@@ -18,7 +18,7 @@ app.add_middleware(
 )
 
 TOTAL_ORDERS = 48
-RATE_LIMIT = 19
+RATE_LIMIT = 2
 WINDOW = 10
 
 idempotency_store = {}
@@ -118,3 +118,11 @@ def test429():
     )
     response.headers["Retry-After"] = "10"
     return response
+
+@app.get("/version")
+def version():
+    return {
+        "version": "FINAL-JUL2-1",
+        "rate_limit": RATE_LIMIT,
+        "window": WINDOW,
+    }
