@@ -134,3 +134,12 @@ def debug():
         "clients": list(rate_buckets.keys()),
         "pid": __import__("os").getpid()
     }
+
+@app.get("/test429")
+def test429():
+    response = JSONResponse(
+        status_code=429,
+        content={"detail": "test"}
+    )
+    response.headers["Retry-After"] = "10"
+    return response
