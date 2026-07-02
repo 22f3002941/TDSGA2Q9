@@ -126,3 +126,11 @@ def list_orders(
 @app.get("/healthz")
 def health():
     return {"status": "ok"}
+
+@app.get("/debug")
+def debug():
+    return {
+        "bucket_count": len(rate_buckets),
+        "clients": list(rate_buckets.keys()),
+        "pid": __import__("os").getpid()
+    }
