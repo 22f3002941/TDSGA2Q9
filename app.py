@@ -1,13 +1,14 @@
-from fastapi import FastAPI, Request, Header, HTTPException, Query
+from fastapi import FastAPI, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from collections import defaultdict, deque
 import time
 import uuid
+import math
 
 app = FastAPI()
 
-# ---------------- CORS (REQUIRED) ----------------
+# ---------------- CORS ----------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,92 +17,112 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------- CONFIG ----------------
 TOTAL_ORDERS = 48
 RATE_LIMIT = 19
-WINDOW = 10  # seconds
+WINDOW = 10
 
-# ---------------- STATE ----------------
-idempotency_store = {}  # key -> response
+# ---------------- In-memory state ----------------
+idempotency_store = {}
 rate_buckets = defaultdict(deque)
 
-# ---------------- RATE LIMIT RESPONSE ----------------
-def rate_limit_response(retry_after: int):
-    return JSONResponse(
-        status_code=429,
-        content={"detail": "Rate limit exceeded"},
-        headers={"Retry-After": str(retry_after)}
-    )
 
-# ---------------- RATE LIMIT LOGIC ----------------
-def check_rate_limit(client_id: str):
-    if not client_id:
-        client_id = "anonymous"
+# ---------------- Rate limiter ----------------
+def enforce_rate_limit(client_id: str | None):
+    client_id = client_id or "anonymous"
 
     now = time.time()
-    dq = rate_buckets[client_id]
+    bucket = rate_buckets[client_id]
 
-    # remove expired requests
-    while dq and now - dq[0] > WINDOW:
-        dq.popleft()
+    # Remove expired timestamps
+    while bucket and now - bucket[0] >= WINDOW:
+        bucket.popleft()
 
-    # enforce limit
-    if len(dq) >= RATE_LIMIT:
-        retry_after = int(WINDOW - (now - dq[0]))
-        return rate_limit_response(max(retry_after, 1))
+    # Limit reached
+    if len(bucket) >= RATE_LIMIT:
+        retry_after = max(1, math.ceil(WINDOW - (now - bucket[0])))
 
-    dq.append(now)
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded"},
+            headers={
+                "Retry-After": str(retry_after)
+            },
+        )
+
+    bucket.append(now)
     return None
 
-# ---------------- 1. IDEMPOTENT ORDER CREATION ----------------
-@app.post("/orders")
+
+# ---------------- POST /orders ----------------
+@app.post("/orders", status_code=201)
 def create_order(
-    request: Request,
-    idempotency_key: str = Header(None),
-    x_client_id: str = Header(None)
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    x_client_id: str | None = Header(None, alias="X-Client-Id"),
 ):
-    rl = check_rate_limit(x_client_id)
+
+    rl = enforce_rate_limit(x_client_id)
     if rl:
         return rl
 
     if not idempotency_key:
-        raise HTTPException(status_code=400, detail="Missing Idempotency-Key")
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Missing Idempotency-Key"},
+        )
 
-    # return cached response
     if idempotency_key in idempotency_store:
-        return idempotency_store[idempotency_key]
+        # Return the same object for repeated key
+        return JSONResponse(
+            status_code=201,
+            content=idempotency_store[idempotency_key],
+        )
 
     order = {
         "id": str(uuid.uuid4())
     }
 
     idempotency_store[idempotency_key] = order
-    return order
 
-# ---------------- 2. CURSOR PAGINATION ----------------
+    return JSONResponse(
+        status_code=201,
+        content=order,
+    )
+
+
+# ---------------- GET /orders ----------------
 @app.get("/orders")
 def list_orders(
-    limit: int = Query(10),
-    cursor: int = Query(0),
-    x_client_id: str = Header(None)
+    limit: int = Query(10, ge=1),
+    cursor: str | None = Query(None),
+    x_client_id: str | None = Header(None, alias="X-Client-Id"),
 ):
-    rl = check_rate_limit(x_client_id)
+
+    rl = enforce_rate_limit(x_client_id)
     if rl:
         return rl
 
-    start = cursor
-    end = min(cursor + limit, TOTAL_ORDERS)
+    if cursor is None:
+        start = 1
+    else:
+        try:
+            start = int(cursor)
+        except ValueError:
+            start = 1
 
-    items = [{"id": i} for i in range(start + 1, end + 1)]
+    end = min(start + limit - 1, TOTAL_ORDERS)
 
-    next_cursor = end if end < TOTAL_ORDERS else None
+    items = [{"id": i} for i in range(start, end + 1)]
+
+    next_cursor = None
+    if end < TOTAL_ORDERS:
+        next_cursor = str(end + 1)
 
     return {
         "items": items,
-        "next_cursor": next_cursor
+        "next_cursor": next_cursor,
     }
 
-# ---------------- OPTIONAL HEALTH ----------------
+
 @app.get("/healthz")
 def health():
     return {"status": "ok"}
