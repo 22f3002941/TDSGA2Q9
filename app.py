@@ -55,7 +55,7 @@ def create_order(
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
     x_client_id: str | None = Header(None, alias="X-Client-Id"),
 ):
-    check_rate_limit(x_client_id)
+    #check_rate_limit(x_client_id)
 
     if idempotency_key in idempotency_store:
         return idempotency_store[idempotency_key]
